@@ -1,8 +1,7 @@
-﻿using ExpenseTrackerAPI.DTOs;
+﻿using ExpenseTrackerAPI.Data;
+using ExpenseTrackerAPI.DTOs;
 using ExpenseTrackerAPI.Models;
-using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
-using System.Collections.Generic;
 
 namespace ExpenseTrackerAPI.Controllers
 {
@@ -11,26 +10,25 @@ namespace ExpenseTrackerAPI.Controllers
     public class ExpenseController : ControllerBase
     {
         private readonly ILogger<ExpenseController> _logger;
-
         public ExpenseController(ILogger<ExpenseController> logger)
         {
             _logger = logger;
-        }
-
-        public static List<Expense> Expenses = new List<Expense>
-        {
-            new Expense { Id = 1, Category = "erik", Date = DateTime.Now, Price = 2, Title = "Elma"}
-
-        };
+        }       
 
         //Gets All Items in The List
         [HttpGet]
-        public IActionResult GetExpenses()
+        public IActionResult GetExpenses(int page = 1,int pageSize = 10)
         {
-            if (Expenses.Count() != 0)
+            if (ApplicationContext.Expenses.Count() != 0)
             {
+                var expansesactive = ApplicationContext.Expenses
+                    .Where(x => x.isDeleted == false)
+                    .Skip((page - 1) * pageSize)
+                    .Take(pageSize)
+                    .ToList();
+
                 _logger.LogInformation("All items were listed successfully.");
-                return Ok(Expenses);
+                return Ok(expansesactive);
             }
 
             _logger.LogError("The list retrieval failed because no expenses were found.");
@@ -42,7 +40,7 @@ namespace ExpenseTrackerAPI.Controllers
         [HttpGet("{ItemId}")]
         public IActionResult GetItemById(int ItemId)
         {
-            var Item = Expenses.FirstOrDefault(a => a.Id == ItemId);
+            var Item = ApplicationContext.Expenses.FirstOrDefault(a => a.Id == ItemId && a.isDeleted == false);
 
             if (Item == null)
             {
@@ -59,23 +57,42 @@ namespace ExpenseTrackerAPI.Controllers
         public IActionResult GetStats()
         {
             // Liste boşsa hata vermesin diye kontrol (Average boş listede hata verebilir)
-            if (!Expenses.Any())
+            if (!ApplicationContext.Expenses.Any())
             {
                 return Ok(new { Message = "Veri yok kirve, istatistik hesaplanamadı." });
             }
 
-            var priceSum = Expenses.Sum(x => x.Price);
-            var averageExpenses = Expenses.Average(x => x.Price);
-            var expenseCount = Expenses.Count();
+            var activespend = ApplicationContext.Expenses.Where(_ => _.isDeleted == false);
+
+            var priceSum = activespend.Sum(x => x.Price);
+            
+            var averageExpenses = activespend.Average(x => x.Price);
+            
+            var expenseCount = activespend.Count();
+            
+            var mostexpensive = activespend
+                .OrderByDescending(a => a.Price)
+                .FirstOrDefault();
+
+            var topCategory = activespend
+            .GroupBy(x => x.Category)
+            .Select(g => new
+            {
+                Category = g.Key,
+                Total = g.Sum(x => x.Price)
+            })
+            .OrderByDescending(x => x.Total)
+            .FirstOrDefault();
 
             _logger.LogInformation("Statistics calculated successfully.");
 
-            // İşte sihirli dokunuş: İsimsiz Obje (Anonymous Object)
             return Ok(new
             {
                 TotalSpent = priceSum,
                 AverageSpend = averageExpenses,
-                TotalTransactionCount = expenseCount
+                TotalTransactionCount = expenseCount,
+                mostspend = mostexpensive,
+                mostspendcategory = topCategory
             });
         }
 
@@ -90,7 +107,7 @@ namespace ExpenseTrackerAPI.Controllers
             [FromQuery] DateTime? StartDate
         )
         {
-            var query = Expenses.AsQueryable();
+            var query = ApplicationContext.Expenses.AsQueryable();
 
 
             if (Id.HasValue)
@@ -139,6 +156,8 @@ namespace ExpenseTrackerAPI.Controllers
                 return NotFound("The requested expense was not found in the list.");
             }
 
+            query = query.Where(a => a.isDeleted == false);
+
             _logger.LogInformation("Items matching the criteria have been successfully listed.");
             return Ok(query);
         }
@@ -149,50 +168,38 @@ namespace ExpenseTrackerAPI.Controllers
         {
             int newid;
 
-            if (Expenses.Count == 0)
+            if (ApplicationContext.Expenses.Count == 0)
             {
                 newid = 1;
             }
             else
             {
-                newid = Expenses.Max(x => x.Id) + 1;
+                newid = ApplicationContext.Expenses.Max(x => x.Id) + 1;
             }
-
-            if (createExpense.Price < 0)
-            {
-                _logger.LogError("The value entered for the 'price' variable is not a valid price");
-                return BadRequest("The value entered for the 'price' variable is not a valid price");
-            }
-
-            if (!string.IsNullOrEmpty(createExpense.Category) && !string.IsNullOrEmpty(createExpense.Title))
-            {
-
+                      
                 var createexpense = new Expense
                 {
                     Id = newid,
                     Category = createExpense.Category,
                     Title = createExpense.Title,
                     Price = createExpense.Price,
-                    Date = DateTime.Now
+                    Date = DateTime.Now,
+                    isDeleted = false,
+                    
                 };
 
-                Expenses.Add(createexpense);
+                ApplicationContext.Expenses.Add(createexpense);
                 _logger.LogInformation("Expense successfully created and appended to the list.");
-                return Ok(Expenses);
-
-            }
-            else
-            {
-                _logger.LogError("Category or title fields cannot be empty.");
-                return BadRequest("Category or Title cannot be empty.");
-            }
+                return Created();
+                       
+           
         }
 
-        //Finds Id and Delete The Item on List
+        //Finds Id and changes isDeleted True
         [HttpDelete("{ItemId}")]
         public IActionResult DeleteItem(int ItemId)
         {
-            var item = Expenses.FirstOrDefault(a => a.Id == ItemId);
+            var item = ApplicationContext.Expenses.FirstOrDefault(a => a.Id == ItemId);
 
             if (item == null)
             {
@@ -200,16 +207,16 @@ namespace ExpenseTrackerAPI.Controllers
                 return NotFound();
             }
 
-            Expenses.Remove(item);
+            item.isDeleted = true;
 
             _logger.LogInformation("Item successfully deleted for the given ID.");
-            return Ok(Expenses);
+            return NoContent();
         }
 
         [HttpPut("{ItemId}")]
         public IActionResult UpdateAllInfo([FromBody] UpdateAllInfoDto updateAll, int ItemId) 
         {
-            var updateitem = Expenses.FirstOrDefault(a => a.Id == ItemId);
+            var updateitem = ApplicationContext.Expenses.FirstOrDefault(a => a.Id == ItemId);
 
             if (updateitem == null)
             {
@@ -231,7 +238,7 @@ namespace ExpenseTrackerAPI.Controllers
         public IActionResult UpdateSpesific(int ItemId, UpdateSpesificInfo update) 
         {
 
-            var updateitem = Expenses.FirstOrDefault(x => x.Id == ItemId);
+            var updateitem = ApplicationContext.Expenses.FirstOrDefault(x => x.Id == ItemId);
             if (updateitem == null)
             { 
                 _logger.LogError("Product not found for this ID.");
@@ -251,5 +258,19 @@ namespace ExpenseTrackerAPI.Controllers
             return Ok(updateitem);
         }
 
+        //Gets Deleted expenses
+        [HttpGet("Deleted")]
+        public IActionResult GetDeleted() 
+        {
+            var deletedexpanses = ApplicationContext.Expenses.Where(a => a.isDeleted == true).ToList();
+
+            if (deletedexpanses.Count() != 0) 
+            {
+                _logger.LogInformation("Deleted Expanses Showed Successfully");
+                return Ok(deletedexpanses);
+            }
+            _logger.LogInformation("Couldn't found any deleted expanses");
+            return NotFound();
+        }
     }
 }
